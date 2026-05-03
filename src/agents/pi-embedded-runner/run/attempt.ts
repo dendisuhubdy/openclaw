@@ -935,7 +935,19 @@ export async function runEmbeddedAttempt(
               },
             });
             corePluginToolStages.mark("attempt:create-openclaw-coding-tools");
+            // [office-debug] DIAGNOSTIC: log raw vs allow-filtered tool names so we can see where office_generate gets dropped
+            // eslint-disable-next-line no-console
+            console.log(
+              "[office-debug] allTools=" +
+                allTools.map((t) => t.name).join(",") +
+                " | toolsAllow=" +
+                JSON.stringify(params.toolsAllow ?? null),
+            );
             const filteredTools = applyEmbeddedAttemptToolsAllow(allTools, params.toolsAllow);
+            // eslint-disable-next-line no-console
+            console.log(
+              "[office-debug] filteredTools=" + filteredTools.map((t) => t.name).join(","),
+            );
             corePluginToolStages.mark("attempt:tools-allow");
             return filteredTools;
           })();
@@ -1055,6 +1067,16 @@ export async function runEmbeddedAttempt(
       modelApi: params.model.api,
       model: params.model,
     });
+    // [office-debug] DIAGNOSTIC: final LLM-bound tool names
+    // eslint-disable-next-line no-console
+    console.log(
+      "[office-debug] LLM-bound tools=" +
+        tools.map((t) => t.name).join(",") +
+        " | provider=" +
+        params.provider +
+        " | toolsEnabled=" +
+        String(toolsEnabled),
+    );
     const clientTools = toolsEnabled && !isRawModelRun ? params.clientTools : undefined;
     const bundleMcpEnabled = shouldCreateBundleMcpRuntimeForAttempt({
       toolsEnabled,
