@@ -305,9 +305,13 @@ export function createOfficeGenerateTool(): AnyAgentTool {
     label: "Office",
     name: "office_generate",
     description:
-      "Create a Microsoft Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file " +
-      "and return a download link. Always use this tool when the user asks for a Word " +
-      "document, slide deck, spreadsheet, or PDF.",
+      "Create a real Microsoft Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF " +
+      "binary file and return a download link. " +
+      "MANDATORY: Use this tool — NOT the `write` tool — for any user request to " +
+      "produce a .docx / .pptx / .xlsx / .pdf file. The `write` tool only writes plain " +
+      "text and will produce a corrupt non-Word file if used for .docx; this tool " +
+      "produces the actual OOXML/PDF binary that Microsoft Word, PowerPoint, Excel, " +
+      "or a PDF reader can open.",
     parameters: OfficeGenerateSchema,
     execute: async (_toolCallId, args) => {
       const params = asToolParamsRecord(args);
