@@ -37,12 +37,9 @@ const FORMAT_MIME: Record<OfficeFormat, string> = {
 };
 
 export const OfficeGenerateSchema = Type.Object({
-  format: Type.Union(
-    SUPPORTED_FORMATS.map((f) => Type.Literal(f)),
-    {
-      description: "Output format: docx | pptx | xlsx | pdf.",
-    },
-  ),
+  format: Type.String({
+    description: 'Output format. One of "docx", "pptx", "xlsx", "pdf".',
+  }),
   filename: Type.Optional(
     Type.String({
       description:
