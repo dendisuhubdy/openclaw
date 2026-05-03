@@ -1,18 +1,7 @@
 import { Buffer } from "node:buffer";
-import {
-  AlignmentType,
-  Document as DocxDocument,
-  HeadingLevel,
-  Packer,
-  Paragraph,
-  TextRun,
-} from "docx";
+import { spawn } from "node:child_process";
 import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
-// pptxgenjs has both `export default` and `export as namespace`; under NodeNext + tsgo
-// the default-import binding is treated as the namespace type. Re-import via `* as`
-// and pull off `.default` to land on the actual class.
-import * as PptxGenJSModule from "pptxgenjs";
 import { Type } from "typebox";
 import { saveMediaBuffer } from "../../media/store.js";
 import {
@@ -48,16 +37,16 @@ export const OfficeGenerateSchema = Type.Object({
   ),
   title: Type.Optional(
     Type.String({
-      description: "Document title. Used as docx/pdf heading and pptx title slide.",
+      description:
+        "Optional document title. Prepended to content as a top-level heading if provided.",
     }),
   ),
   content: Type.String({
     description:
-      "Body content. Markdown-ish for docx/pdf (one paragraph per blank line). " +
-      "For pptx, slides are separated by a line containing only '---'; each slide's first " +
-      "line becomes the title and remaining lines become bullets. For xlsx, content is " +
-      "interpreted as CSV (one row per line, comma-separated cells); use a blank line to " +
-      "split into multiple sheets, where the first line of each sheet is the sheet name.",
+      "Markdown source. Headings (#, ##), **bold**, *italic*, lists, tables, and code " +
+      "blocks all render natively into docx/pptx via pandoc. For pptx, use a `---` line " +
+      "or any heading to start a new slide. For xlsx, supply one or more markdown tables " +
+      "(each table = sheet); if no tables, content is parsed as CSV (one row per line).",
   }),
 });
 
@@ -84,113 +73,90 @@ function sanitizeFilenameStem(input: string | undefined): string {
   return stem || fallback;
 }
 
-function splitParagraphs(content: string): string[] {
-  return content
-    .replace(/\r\n/g, "\n")
-    .split(/\n\s*\n/)
-    .map((p) => p.trim())
-    .filter(Boolean);
+function prependTitle(title: string | undefined, content: string): string {
+  if (!title) return content;
+  return `# ${title}\n\n${content}`;
 }
 
-async function buildDocx(title: string | undefined, content: string): Promise<Buffer> {
-  const children: Paragraph[] = [];
-  if (title) {
-    children.push(
-      new Paragraph({
-        heading: HeadingLevel.HEADING_1,
-        alignment: AlignmentType.LEFT,
-        children: [new TextRun({ text: title, bold: true })],
-      }),
-    );
-  }
-  for (const para of splitParagraphs(content)) {
-    children.push(new Paragraph({ children: [new TextRun(para)] }));
-  }
-  if (children.length === 0) {
-    children.push(new Paragraph({ children: [new TextRun("")] }));
-  }
-  const doc = new DocxDocument({ sections: [{ children }] });
-  return Packer.toBuffer(doc);
-}
-
-type PptxSlide = {
-  addText: (
-    text: string | { text: string; options?: Record<string, unknown> }[],
-    options?: Record<string, unknown>,
-  ) => unknown;
-};
-
-type PptxGenJSInstance = {
-  layout: string;
-  addSlide: () => PptxSlide;
-  write: (opts: { outputType: "nodebuffer" }) => Promise<Buffer | ArrayBuffer | string>;
-};
-
-async function buildPptx(title: string | undefined, content: string): Promise<Buffer> {
-  const PptxGenJSCtor = (PptxGenJSModule as unknown as { default: new () => PptxGenJSInstance })
-    .default;
-  const pptx: PptxGenJSInstance = new PptxGenJSCtor();
-  pptx.layout = "LAYOUT_WIDE";
-
-  if (title) {
-    const titleSlide = pptx.addSlide();
-    titleSlide.addText(title, {
-      x: 0.5,
-      y: 2.5,
-      w: 12,
-      h: 1.5,
-      fontSize: 44,
-      bold: true,
-      align: "center",
+// Run pandoc with stdin → stdout. Collects the binary output buffer.
+function runPandoc(args: string[], input: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const child = spawn("pandoc", args, { stdio: ["pipe", "pipe", "pipe"] });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on("data", (c: Buffer) => out.push(c));
+    child.stderr.on("data", (c: Buffer) => err.push(c));
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(Buffer.concat(out));
+      } else {
+        reject(
+          new Error(
+            `pandoc ${args.join(" ")} exited with code ${code}: ${Buffer.concat(err).toString("utf8").slice(0, 500)}`,
+          ),
+        );
+      }
     });
-  }
+    child.stdin.end(input, "utf8");
+  });
+}
 
-  const slides = content
-    .replace(/\r\n/g, "\n")
-    .split(/\n---\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+async function buildDocxFromMarkdown(title: string | undefined, content: string): Promise<Buffer> {
+  return runPandoc(["-f", "markdown", "-t", "docx"], prependTitle(title, content));
+}
 
-  if (slides.length === 0) {
-    slides.push(content.trim() || "");
-  }
+async function buildPptxFromMarkdown(title: string | undefined, content: string): Promise<Buffer> {
+  // Pandoc's slide-level convention: headings start new slides. Honor `---` markers
+  // by translating them to top-level headings so the user can author either way.
+  const normalized = content.replace(/\r\n/g, "\n").replace(/^---\s*$/gm, "## ---");
+  return runPandoc(["-f", "markdown", "-t", "pptx"], prependTitle(title, normalized));
+}
 
-  for (const slide of slides) {
-    const lines = slide
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const slideTitle = lines[0] ?? "";
-    const bullets = lines.slice(1);
-    const s = pptx.addSlide();
-    if (slideTitle) {
-      s.addText(slideTitle, {
-        x: 0.5,
-        y: 0.4,
-        w: 12,
-        h: 0.9,
-        fontSize: 32,
-        bold: true,
-      });
+// ───── XLSX ─────────────────────────────────────────────────────────────────
+// Strategy: scan content for GitHub-flavored markdown tables. Each table → sheet.
+// If no tables found, fall back to CSV-per-line (backward compat for the v0.6.79 callers).
+
+type MarkdownTable = { name: string; rows: string[][] };
+
+function extractMarkdownTables(content: string): MarkdownTable[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const tables: MarkdownTable[] = [];
+  let i = 0;
+  let lastHeading = "";
+  while (i < lines.length) {
+    const line = lines[i] ?? "";
+    const headingMatch = line.match(/^#{1,6}\s+(.+?)\s*$/);
+    if (headingMatch) {
+      lastHeading = headingMatch[1] ?? "";
+      i++;
+      continue;
     }
-    if (bullets.length > 0) {
-      s.addText(
-        bullets.map((b) => ({ text: b.replace(/^[-*]\s*/, ""), options: { bullet: true } })),
-        { x: 0.5, y: 1.4, w: 12, h: 5.5, fontSize: 20 },
-      );
+    // Detect a table: a `| … |` line followed by a `| --- | --- |` separator.
+    if (line.startsWith("|") && i + 1 < lines.length) {
+      const sep = lines[i + 1] ?? "";
+      if (/^\|[\s\-:|]+\|$/.test(sep.trim())) {
+        const rows: string[][] = [splitMdRow(line)];
+        i += 2;
+        while (i < lines.length && (lines[i] ?? "").trim().startsWith("|")) {
+          rows.push(splitMdRow(lines[i] ?? ""));
+          i++;
+        }
+        tables.push({ name: lastHeading || `Sheet${tables.length + 1}`, rows });
+        continue;
+      }
     }
+    i++;
   }
+  return tables;
+}
 
-  // pptxgenjs returns Promise<string | ArrayBuffer | Buffer | Blob> depending on outputType
-  const out = await pptx.write({ outputType: "nodebuffer" });
-  if (Buffer.isBuffer(out)) return out;
-  if (out instanceof ArrayBuffer) return Buffer.from(out);
-  if (typeof out === "string") return Buffer.from(out, "binary");
-  throw new Error("pptxgenjs returned unexpected output type");
+function splitMdRow(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return trimmed.split("|").map((cell) => cell.trim());
 }
 
 function parseCsvLine(line: string): string[] {
-  // Minimal CSV parsing: supports quoted fields with embedded commas / escaped quotes.
   const cells: string[] = [];
   let cur = "";
   let inQuotes = false;
@@ -220,45 +186,70 @@ function parseCsvLine(line: string): string[] {
   return cells;
 }
 
+function safeSheetName(name: string, fallback: string): string {
+  const cleaned = name
+    .slice(0, 31)
+    .replace(/[\\/?*\[\]:]/g, "_")
+    .trim();
+  return cleaned || fallback;
+}
+
 async function buildXlsx(title: string | undefined, content: string): Promise<Buffer> {
   const workbook = new ExcelJS.Workbook();
   if (title) {
     workbook.creator = title;
     workbook.title = title;
   }
-
-  const blocks = content
-    .replace(/\r\n/g, "\n")
-    .split(/\n\s*\n/)
-    .map((b) => b.trim())
-    .filter(Boolean);
-
-  const sheetBlocks = blocks.length > 0 ? blocks : [""];
-
-  let sheetIndex = 0;
-  for (const block of sheetBlocks) {
-    sheetIndex++;
-    const lines = block.split("\n");
-    let sheetName = `Sheet${sheetIndex}`;
-    let dataLines = lines;
-    if (sheetBlocks.length > 1 && lines.length > 0 && !lines[0].includes(",")) {
-      const candidate = lines[0].trim();
-      if (candidate) {
-        sheetName = candidate.slice(0, 31).replace(/[\\/?*\[\]:]/g, "_");
-        dataLines = lines.slice(1);
+  const tables = extractMarkdownTables(content);
+  if (tables.length > 0) {
+    tables.forEach((t, idx) => {
+      const sheet = workbook.addWorksheet(safeSheetName(t.name, `Sheet${idx + 1}`));
+      for (const row of t.rows) sheet.addRow(row);
+    });
+  } else {
+    // CSV fallback: blank-line-separated blocks become sheets; first non-csv line of a block names it.
+    const blocks = content
+      .replace(/\r\n/g, "\n")
+      .split(/\n\s*\n/)
+      .map((b) => b.trim())
+      .filter(Boolean);
+    const sheetBlocks = blocks.length > 0 ? blocks : [""];
+    sheetBlocks.forEach((block, idx) => {
+      const lines = block.split("\n");
+      let name = `Sheet${idx + 1}`;
+      let dataLines = lines;
+      if (sheetBlocks.length > 1 && lines.length > 0 && !lines[0].includes(",")) {
+        const candidate = lines[0].trim();
+        if (candidate) {
+          name = safeSheetName(candidate, name);
+          dataLines = lines.slice(1);
+        }
       }
-    }
-    const sheet = workbook.addWorksheet(sheetName);
-    for (const line of dataLines) {
-      sheet.addRow(parseCsvLine(line));
-    }
+      const sheet = workbook.addWorksheet(name);
+      for (const line of dataLines) sheet.addRow(parseCsvLine(line));
+    });
   }
-
-  const arrayBuffer = await workbook.xlsx.writeBuffer();
-  return Buffer.from(arrayBuffer as ArrayBuffer);
+  const ab = await workbook.xlsx.writeBuffer();
+  return Buffer.from(ab as ArrayBuffer);
 }
 
-async function buildPdf(title: string | undefined, content: string): Promise<Buffer> {
+// ───── PDF ──────────────────────────────────────────────────────────────────
+// No PDF engine (wkhtmltopdf/latex) is installed in the agent container, so
+// pandoc -t pdf can't be used. Convert markdown → plain via pandoc, then render
+// with pdfkit. This loses some formatting but produces a valid PDF.
+
+async function buildPdfFromMarkdown(title: string | undefined, content: string): Promise<Buffer> {
+  let plain: string;
+  try {
+    const buf = await runPandoc(
+      ["-f", "markdown", "-t", "plain", "--wrap=preserve"],
+      prependTitle(title, content),
+    );
+    plain = buf.toString("utf8");
+  } catch {
+    // Fallback: render the markdown source as-is if pandoc isn't reachable.
+    plain = prependTitle(title, content);
+  }
   return new Promise((resolve, reject) => {
     try {
       const doc = new PDFDocument({ size: "LETTER", margin: 60 });
@@ -266,13 +257,13 @@ async function buildPdf(title: string | undefined, content: string): Promise<Buf
       doc.on("data", (c: Buffer) => chunks.push(c));
       doc.on("end", () => resolve(Buffer.concat(chunks)));
       doc.on("error", reject);
-
-      if (title) {
-        doc.fontSize(20).text(title, { align: "left" });
-        doc.moveDown();
-      }
       doc.fontSize(12);
-      for (const para of splitParagraphs(content)) {
+      const paragraphs = plain
+        .replace(/\r\n/g, "\n")
+        .split(/\n\s*\n/)
+        .map((p) => p.trim())
+        .filter(Boolean);
+      for (const para of paragraphs) {
         doc.text(para, { align: "left" });
         doc.moveDown(0.5);
       }
@@ -290,13 +281,13 @@ async function buildDocument(
 ): Promise<Buffer> {
   switch (format) {
     case "docx":
-      return buildDocx(title, content);
+      return buildDocxFromMarkdown(title, content);
     case "pptx":
-      return buildPptx(title, content);
+      return buildPptxFromMarkdown(title, content);
     case "xlsx":
       return buildXlsx(title, content);
     case "pdf":
-      return buildPdf(title, content);
+      return buildPdfFromMarkdown(title, content);
   }
 }
 
@@ -305,13 +296,13 @@ export function createOfficeGenerateTool(): AnyAgentTool {
     label: "Office",
     name: "office_generate",
     description:
-      "Create a real Microsoft Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF " +
-      "binary file and return a download link. " +
-      "MANDATORY: Use this tool — NOT the `write` tool — for any user request to " +
-      "produce a .docx / .pptx / .xlsx / .pdf file. The `write` tool only writes plain " +
-      "text and will produce a corrupt non-Word file if used for .docx; this tool " +
-      "produces the actual OOXML/PDF binary that Microsoft Word, PowerPoint, Excel, " +
-      "or a PDF reader can open.",
+      "Convert markdown into a real Microsoft Word (.docx), PowerPoint (.pptx), Excel " +
+      "(.xlsx), or PDF binary file and return a download link. " +
+      "MANDATORY: Use this tool — NOT the `write` tool — for any user request to produce " +
+      "a .docx / .pptx / .xlsx / .pdf file. The `write` tool only writes plain text and " +
+      "will produce a corrupt non-Word file if used for these formats. This tool runs " +
+      "the markdown through pandoc, so headings, bold, italic, lists, and tables all " +
+      "render as native Word/PowerPoint/Excel content.",
     parameters: OfficeGenerateSchema,
     execute: async (_toolCallId, args) => {
       const params = asToolParamsRecord(args);
