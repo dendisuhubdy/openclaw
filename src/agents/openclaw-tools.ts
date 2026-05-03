@@ -42,6 +42,7 @@ import { createMessageTool } from "./tools/message-tool.js";
 import { coerceToolModelConfig, hasToolModelConfig } from "./tools/model-config.helpers.js";
 import { createMusicGenerateTool } from "./tools/music-generate-tool.js";
 import { createNodesTool } from "./tools/nodes-tool.js";
+import { createOfficeGenerateTool } from "./tools/office-generate-tool.js";
 import { coercePdfModelConfig } from "./tools/pdf-tool.helpers.js";
 import { createPdfTool } from "./tools/pdf-tool.js";
 import { createSessionStatusTool } from "./tools/session-status-tool.js";
@@ -570,7 +571,13 @@ export function createOpenClawTools(
       config: resolvedConfig,
       sandboxed: options?.sandboxed,
     }),
-    ...collectPresentOpenClawTools([webSearchTool, webFetchTool, imageTool, pdfTool]),
+    ...collectPresentOpenClawTools([
+      webSearchTool,
+      webFetchTool,
+      imageTool,
+      pdfTool,
+      createOfficeGenerateTool(),
+    ]),
   ];
   options?.recordToolPrepStage?.("openclaw-tools:core-tool-list");
 
