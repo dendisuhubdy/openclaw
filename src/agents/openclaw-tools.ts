@@ -571,13 +571,8 @@ export function createOpenClawTools(
       config: resolvedConfig,
       sandboxed: options?.sandboxed,
     }),
-    ...collectPresentOpenClawTools([
-      webSearchTool,
-      webFetchTool,
-      imageTool,
-      pdfTool,
-      createOfficeGenerateTool(),
-    ]),
+    createOfficeGenerateTool(),
+    ...collectPresentOpenClawTools([webSearchTool, webFetchTool, imageTool, pdfTool]),
   ];
   options?.recordToolPrepStage?.("openclaw-tools:core-tool-list");
 
