@@ -309,6 +309,14 @@ const CORE_TOOL_DEFINITIONS: CoreToolDefinition[] = [
     profiles: [],
     includeInOpenClawGroup: true,
   },
+  {
+    id: "office_generate",
+    label: "office_generate",
+    description: "Generate DOCX, PPTX, XLSX, or PDF documents",
+    sectionId: "media",
+    profiles: ["coding", "messaging"],
+    includeInOpenClawGroup: true,
+  },
 ];
 
 const CORE_TOOL_BY_ID = new Map<string, CoreToolDefinition>(
