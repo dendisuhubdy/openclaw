@@ -302,13 +302,12 @@ async function buildDocument(
 
 export function createOfficeGenerateTool(): AnyAgentTool {
   return {
-    label: "Office Document Generator",
+    label: "Office",
     name: "office_generate",
     description:
-      "Generate an Office document (DOCX, PPTX, XLSX) or PDF from structured text and " +
-      "save it to the user's files. Returns the saved media path which the host bridges to " +
-      "a downloadable URL. Use for: drafting reports (DOCX/PDF), slide decks (PPTX), " +
-      "or tabular data (XLSX). Content syntax: see the 'content' parameter description.",
+      "Create a Microsoft Word (.docx), PowerPoint (.pptx), Excel (.xlsx), or PDF file " +
+      "and return a download link. Always use this tool when the user asks for a Word " +
+      "document, slide deck, spreadsheet, or PDF.",
     parameters: OfficeGenerateSchema,
     execute: async (_toolCallId, args) => {
       const params = asToolParamsRecord(args);
